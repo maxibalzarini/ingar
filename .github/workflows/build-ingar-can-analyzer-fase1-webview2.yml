@@ -1,0 +1,67 @@
+name: Build INGAR CAN Analyzer Fase 1 WebView2
+
+on:
+  pull_request:
+    branches:
+      - claude/remote-access-software-Tb2LO
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-validate:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Rebuild source package
+        shell: pwsh
+        run: |
+          $parts = Get-ChildItem "can-analyzer/source.part*.b64" | Sort-Object Name
+          $base64 = ($parts | ForEach-Object { Get-Content $_.FullName -Raw }) -join ''
+          [IO.File]::WriteAllBytes("can-analyzer/source.zip", [Convert]::FromBase64String($base64))
+          Expand-Archive "can-analyzer/source.zip" "buildsrc" -Force
+          $iconBytes = [Convert]::FromBase64String((Get-Content "buildsrc/Assets/app.ico.b64" -Raw))
+          [IO.File]::WriteAllBytes("buildsrc/Assets/app.ico", $iconBytes)
+
+      - name: Restore
+        run: dotnet restore buildsrc/INGAR_CAN_ANALYZER.csproj
+
+      - name: Publish Windows x64 single executable
+        run: dotnet publish buildsrc/INGAR_CAN_ANALYZER.csproj -c Release -r win-x64 --self-contained true -o dist
+
+      - name: Run embedded self-test
+        shell: pwsh
+        run: |
+          & ".\dist\INGAR_CAN_ANALYZER.exe" --self-test
+          if ($LASTEXITCODE -ne 0) { throw "Self-test failed with exit code $LASTEXITCODE" }
+          $result = Get-Content ".\fase1-selftest.json" -Raw | ConvertFrom-Json
+          if ($result.status -ne "OK") { throw "Self-test did not return OK" }
+          if (-not $result.html_embedded) { throw "Embedded HTML test failed" }
+          if (-not $result.indexeddb) { throw "IndexedDB test failed" }
+          if (-not $result.no_localstorage) { throw "localStorage is present" }
+          if (-not $result.no_local_server) { throw "Local server reference is present" }
+
+      - name: Create portable test package
+        shell: pwsh
+        run: Compress-Archive -Path ".\dist\*" -DestinationPath ".\INGAR_CAN_ANALYZER_FASE_1_WEBVIEW2.zip" -Force
+
+      - name: Upload executable package
+        uses: actions/upload-artifact@v4
+        with:
+          name: INGAR_CAN_ANALYZER_FASE_1_WEBVIEW2
+          path: INGAR_CAN_ANALYZER_FASE_1_WEBVIEW2.zip
+
+      - name: Upload validation result
+        uses: actions/upload-artifact@v4
+        with:
+          name: INGAR_CAN_ANALYZER_FASE_1_VALIDACION
+          path: fase1-selftest.json
