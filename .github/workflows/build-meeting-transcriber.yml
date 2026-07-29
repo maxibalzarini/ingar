@@ -16,7 +16,7 @@ env:
 jobs:
   build-windows-x64:
     runs-on: windows-2022
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -72,9 +72,35 @@ jobs:
           '@ | Set-Content -Path generate_assets.py -Encoding UTF8
           python generate_assets.py
 
-      - name: Validate Python source
+      - name: Restore V1.5 precision sources
         shell: pwsh
-        run: python -m py_compile meeting_transcriber/app.py
+        run: |
+          $encoded = Get-Content "meeting_transcriber\source_v15.zip.b64" -Raw
+          [IO.File]::WriteAllBytes("meeting_transcriber\source_v15.zip", [Convert]::FromBase64String($encoded.Trim()))
+          Expand-Archive -Path "meeting_transcriber\source_v15.zip" -DestinationPath "meeting_transcriber" -Force
+          Remove-Item "meeting_transcriber\source_v15.zip" -Force
+
+      - name: Validate Python sources
+        shell: pwsh
+        run: |
+          python -m py_compile meeting_transcriber/app.py
+          python -m py_compile meeting_transcriber/audio_worker.py
+
+      - name: Build isolated audio worker
+        shell: pwsh
+        working-directory: meeting_transcriber
+        run: |
+          python -m PyInstaller `
+            --noconfirm `
+            --clean `
+            --onefile `
+            --console `
+            --name "INGAR_Audio_Worker" `
+            --collect-all pyaudiowpatch `
+            --collect-all numpy `
+            audio_worker.py
+          if ($LASTEXITCODE -ne 0) { throw "No se pudo compilar el servicio de audio" }
+          if (-not (Test-Path "dist\INGAR_Audio_Worker.exe")) { throw "No se generó el servicio de audio" }
 
       - name: Build standalone EXE
         shell: pwsh
@@ -88,7 +114,7 @@ jobs:
             --name "INGAR_Meeting_Transcriber" `
             --icon "assets\ingar_meeting_transcriber.ico" `
             --add-data "assets;assets" `
-            --collect-all pyaudiowpatch `
+            --add-binary "dist\INGAR_Audio_Worker.exe;." `
             --collect-all faster_whisper `
             --collect-all ctranslate2 `
             --collect-all tokenizers `
@@ -101,13 +127,14 @@ jobs:
           $exe = Get-Item "dist\INGAR_Meeting_Transcriber.exe"
           $hash = (Get-FileHash -Algorithm SHA256 $exe.FullName).Hash
           @"
-          INGAR Meeting Transcriber V1.4.2
+          INGAR Meeting Transcriber V1.5.0
           Windows 10/11 x64
           Archivo único: INGAR_Meeting_Transcriber.exe
           Tamaño: $($exe.Length) bytes
           SHA256: $hash
           No requiere Python instalado.
-          El modelo Whisper se descarga una sola vez durante el primer uso.
+          El modelo Medium se descarga una sola vez durante el primer uso.
+          El micrófono usa un único canal físico y doble pase de transcripción.
           "@ | Set-Content "dist\LEEME_EXE.txt" -Encoding UTF8
 
       - name: Smoke test executable startup
@@ -115,7 +142,7 @@ jobs:
         run: |
           $exe = Resolve-Path "meeting_transcriber\dist\INGAR_Meeting_Transcriber.exe"
           $p = Start-Process -FilePath $exe -PassThru
-          Start-Sleep -Seconds 15
+          Start-Sleep -Seconds 25
           if ($p.HasExited) { throw "El EXE se cerró durante el arranque. Código: $($p.ExitCode)" }
           Stop-Process -Id $p.Id -Force
           Write-Host "SMOKE_TEST_OK"
@@ -123,7 +150,7 @@ jobs:
       - name: Upload executable
         uses: actions/upload-artifact@v4
         with:
-          name: INGAR_Meeting_Transcriber_V1_4_2_Windows_x64
+          name: INGAR_Meeting_Transcriber_V1_5_0_Windows_x64
           path: |
             meeting_transcriber/dist/INGAR_Meeting_Transcriber.exe
             meeting_transcriber/dist/LEEME_EXE.txt
