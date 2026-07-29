@@ -1,0 +1,142 @@
+name: Build INGAR Meeting Transcriber EXE
+
+on:
+  pull_request:
+    branches:
+      - claude/remote-access-software-Tb2LO
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  PYTHONUTF8: "1"
+  PYTHONIOENCODING: "utf-8"
+
+jobs:
+  build-windows-x64:
+    runs-on: windows-2022
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.12 x64
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          architecture: "x64"
+          cache: "pip"
+          cache-dependency-path: meeting_transcriber/requirements.txt
+
+      - name: Install build dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --disable-pip-version-check --upgrade pip wheel setuptools
+          python -m pip install --disable-pip-version-check -r meeting_transcriber/requirements.txt
+          python -m pip install --disable-pip-version-check pyinstaller==6.15.0 pillow
+
+      - name: Generate INGAR assets
+        shell: pwsh
+        run: |
+          @'
+          from pathlib import Path
+          from PIL import Image, ImageDraw, ImageFont
+
+          root = Path("meeting_transcriber/assets")
+          root.mkdir(parents=True, exist_ok=True)
+          blue = (8, 120, 185, 255)
+          navy = (23, 54, 80, 255)
+          grey = (130, 145, 155, 255)
+
+          logo = Image.new("RGBA", (640, 190), "white")
+          d = ImageDraw.Draw(logo)
+          d.polygon([(24, 35), (170, 35), (106, 100), (24, 100)], fill=blue)
+          d.polygon([(24, 103), (126, 103), (79, 150), (24, 150)], fill=(185, 190, 194, 255))
+          try:
+              font_big = ImageFont.truetype("C:/Windows/Fonts/segoeui.ttf", 92)
+              font_small = ImageFont.truetype("C:/Windows/Fonts/segoeui.ttf", 42)
+          except Exception:
+              font_big = ImageFont.load_default()
+              font_small = ImageFont.load_default()
+          d.text((190, 20), "INGAR", fill=blue, font=font_big)
+          d.text((192, 115), "CONSULTING", fill=grey, font=font_small)
+          logo.save(root / "logo_ingar.png", optimize=True)
+
+          icon = Image.new("RGBA", (256, 256), "white")
+          di = ImageDraw.Draw(icon)
+          di.polygon([(28, 48), (205, 48), (128, 128), (28, 128)], fill=blue)
+          di.polygon([(28, 132), (155, 132), (92, 196), (28, 196)], fill=(185, 190, 194, 255))
+          di.text((82, 196), "INGAR", fill=navy, font=ImageFont.load_default())
+          icon.save(root / "ingar_meeting_transcriber.ico", format="ICO", sizes=[(16,16),(24,24),(32,32),(48,48),(64,64),(128,128),(256,256)])
+          '@ | Set-Content -Path generate_assets.py -Encoding UTF8
+          python generate_assets.py
+
+      - name: Apply V1.5 microphone accuracy patch
+        shell: pwsh
+        run: python meeting_transcriber/patch_v15.py
+
+      - name: Validate patched source
+        shell: pwsh
+        run: |
+          python -m py_compile meeting_transcriber/app.py
+          $source = Get-Content meeting_transcriber/app.py -Raw
+          if ($source -notmatch 'APP_VERSION = "1.5.0"') { throw "No se aplicó la versión V1.5.0" }
+          if ($source -notmatch 'No promediar: evita cancelación de fase') { throw "No se aplicó la corrección de canal físico" }
+          if ($source -notmatch 'diagnostico_transcripcion_local.json') { throw "Falta la selección de doble pase" }
+
+      - name: Build standalone EXE
+        shell: pwsh
+        working-directory: meeting_transcriber
+        run: |
+          python -m PyInstaller `
+            --noconfirm `
+            --clean `
+            --onefile `
+            --windowed `
+            --name "INGAR_Meeting_Transcriber" `
+            --icon "assets\ingar_meeting_transcriber.ico" `
+            --add-data "assets;assets" `
+            --collect-all pyaudiowpatch `
+            --collect-all faster_whisper `
+            --collect-all ctranslate2 `
+            --collect-all tokenizers `
+            --collect-all av `
+            --collect-all huggingface_hub `
+            --collect-all onnxruntime `
+            app.py
+          if ($LASTEXITCODE -ne 0) { throw "PyInstaller terminó con error" }
+          if (-not (Test-Path "dist\INGAR_Meeting_Transcriber.exe")) { throw "No se generó el EXE" }
+          $exe = Get-Item "dist\INGAR_Meeting_Transcriber.exe"
+          $hash = (Get-FileHash -Algorithm SHA256 $exe.FullName).Hash
+          @"
+          INGAR Meeting Transcriber V1.5.0
+          Windows 10/11 x64
+          Archivo único: INGAR_Meeting_Transcriber.exe
+          Tamaño: $($exe.Length) bytes
+          SHA256: $hash
+          No requiere Python instalado.
+          El modelo Medium se descarga una sola vez durante el primer uso.
+          El micrófono usa un único canal físico y doble pase de transcripción.
+          "@ | Set-Content "dist\LEEME_EXE.txt" -Encoding UTF8
+
+      - name: Smoke test executable startup
+        shell: pwsh
+        run: |
+          $exe = Resolve-Path "meeting_transcriber\dist\INGAR_Meeting_Transcriber.exe"
+          $p = Start-Process -FilePath $exe -PassThru
+          Start-Sleep -Seconds 25
+          if ($p.HasExited) { throw "El EXE se cerró durante el arranque. Código: $($p.ExitCode)" }
+          Stop-Process -Id $p.Id -Force
+          Write-Host "SMOKE_TEST_OK"
+
+      - name: Upload executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: INGAR_Meeting_Transcriber_V1_5_0_Windows_x64
+          path: |
+            meeting_transcriber/dist/INGAR_Meeting_Transcriber.exe
+            meeting_transcriber/dist/LEEME_EXE.txt
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
