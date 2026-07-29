@@ -72,35 +72,18 @@ jobs:
           '@ | Set-Content -Path generate_assets.py -Encoding UTF8
           python generate_assets.py
 
-      - name: Restore V1.5 precision sources
+      - name: Apply V1.5 microphone accuracy patch
         shell: pwsh
-        run: |
-          $encoded = Get-Content "meeting_transcriber\source_v15.zip.b64" -Raw
-          [IO.File]::WriteAllBytes("meeting_transcriber\source_v15.zip", [Convert]::FromBase64String($encoded.Trim()))
-          Expand-Archive -Path "meeting_transcriber\source_v15.zip" -DestinationPath "meeting_transcriber" -Force
-          Remove-Item "meeting_transcriber\source_v15.zip" -Force
+        run: python meeting_transcriber/patch_v15.py
 
-      - name: Validate Python sources
+      - name: Validate patched source
         shell: pwsh
         run: |
           python -m py_compile meeting_transcriber/app.py
-          python -m py_compile meeting_transcriber/audio_worker.py
-
-      - name: Build isolated audio worker
-        shell: pwsh
-        working-directory: meeting_transcriber
-        run: |
-          python -m PyInstaller `
-            --noconfirm `
-            --clean `
-            --onefile `
-            --console `
-            --name "INGAR_Audio_Worker" `
-            --collect-all pyaudiowpatch `
-            --collect-all numpy `
-            audio_worker.py
-          if ($LASTEXITCODE -ne 0) { throw "No se pudo compilar el servicio de audio" }
-          if (-not (Test-Path "dist\INGAR_Audio_Worker.exe")) { throw "No se generó el servicio de audio" }
+          $source = Get-Content meeting_transcriber/app.py -Raw
+          if ($source -notmatch 'APP_VERSION = "1.5.0"') { throw "No se aplicó la versión V1.5.0" }
+          if ($source -notmatch 'No promediar: evita cancelación de fase') { throw "No se aplicó la corrección de canal físico" }
+          if ($source -notmatch 'diagnostico_transcripcion_local.json') { throw "Falta la selección de doble pase" }
 
       - name: Build standalone EXE
         shell: pwsh
@@ -114,7 +97,7 @@ jobs:
             --name "INGAR_Meeting_Transcriber" `
             --icon "assets\ingar_meeting_transcriber.ico" `
             --add-data "assets;assets" `
-            --add-binary "dist\INGAR_Audio_Worker.exe;." `
+            --collect-all pyaudiowpatch `
             --collect-all faster_whisper `
             --collect-all ctranslate2 `
             --collect-all tokenizers `
