@@ -1,0 +1,24 @@
+name: Build NSIS Linux Toolchain
+
+on:
+  push:
+    branches:
+      - build/hr-5.3.9-nsis-r2
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install NSIS
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y nsis
+          mkdir -p artifact/bin artifact/share
+          cp /usr/bin/makensis artifact/bin/
+          cp -a /usr/share/nsis artifact/share/
+          makensis -VERSION > artifact/NSIS_VERSION.txt
+      - name: Upload NSIS Linux toolchain
+        uses: actions/upload-artifact@v4
+        with:
+          name: nsis-linux-toolchain
+          path: artifact
